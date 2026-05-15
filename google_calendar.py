@@ -33,7 +33,9 @@ TOOL_DESCRIPTION = (
     "The 'input' parameter should be a JSON string with an 'action' ('list' or 'create'). "
     "For 'list', it returns the next 10 events. "
     "For 'create', provide 'summary', 'start_time' (ISO format), 'end_time' (ISO format), "
-    "and optionally 'description'. It will automatically add a Google Meet link."
+    "and optionally 'description' and 'attendees' (a list of email addresses). "
+    "If no timezone is specified in the timestamps, the system's local time will be used. "
+    "It will automatically add a Google Meet link."
 )
 TOOL_PARAMETERS = {
     "type": "object",
@@ -111,7 +113,24 @@ def run_tool(*, input: str) -> str:
             summary = params.get("summary")
             start_time = params.get("start_time")
             end_time = params.get("end_time")
+
+            # Handle naive datetimes by assuming local system timezone
+            for time_val in [start_time, end_time]:
+                if time_val:
+                    try:
+                        dt = datetime.datetime.fromisoformat(time_val)
+                        if dt.tzinfo is None:
+                            # Attach local timezone if none provided
+                            dt = dt.astimezone()
+                            # Update value back to ISO format with timezone
+                            if time_val == start_time:
+                                start_time = dt.isoformat()
+                            else:
+                                end_time = dt.isoformat()
+                    except ValueError:
+                        pass # Leave as is if not ISO format
             description = params.get("description", "")
+            attendees = params.get("attendees", [])
 
             if not all([summary, start_time, end_time]):
                 return "Missing required parameters: summary, start_time, and end_time are all required for creation."
@@ -119,8 +138,9 @@ def run_tool(*, input: str) -> str:
             event_body = {
                 "summary": summary,
                 "description": description,
-                "start": {"dateTime": start_time, "timeZone": "UTC"},
-                "end": {"dateTime": end_time, "timeZone": "UTC"},
+                "start": {"dateTime": start_time},
+                "end": {"dateTime": end_time},
+                "attendees": [{"email": email} for email in attendees],
                 "conferenceData": {
                     "createRequest": {
                         "requestId": f"pyagent-{datetime.datetime.now().timestamp()}",
