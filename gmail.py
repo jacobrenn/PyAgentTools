@@ -33,16 +33,16 @@ from googleapiclient.errors import HttpError
 TOOL_NAME = "gmail"
 TOOL_DESCRIPTION = (
     "Manages Gmail messages. Actions include 'search' (find emails), "
-    "'send' (send a new email), 'reply' (reply to a specific message), "
-    "and 'mark_read' (mark a message as read)."
+    "'read' (fetch the full content of a specific email), 'send' (send a new email), "
+    "'reply' (reply to a specific message), and 'mark_read' (mark a message as read)."
 )
 TOOL_PARAMETERS = {
     "type": "object",
     "properties": {
         "action": {
             "type": "string",
-            "description": "The action to perform: 'search', 'send', 'reply', or 'mark_read'.",
-            "enum": ["search", "send", "reply", "mark_read"],
+            "description": "The action to perform: 'search', 'read', 'send', 'reply', or 'mark_read'.",
+            "enum": ["search", "read", "send", "reply", "mark_read"],
         },
         "query": {
             "type": "string",
@@ -62,12 +62,16 @@ TOOL_PARAMETERS = {
         },
         "message_id": {
             "type": "string",
-            "description": "The ID of the message for 'reply' or 'mark_read'.",
+            "description": "The ID of the message for 'read', 'reply', or 'mark_read'.",
+        },
+        "include_body": {
+            "type": "boolean",
+            "description": "For 'search', include the full email body for each result.",
         },
     },
     "required": ["action"],
 }
-TOOL_VERSION = "2"
+TOOL_VERSION = "3"
 
 # Changed to modify scope to allow sending and marking read
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
@@ -112,6 +116,36 @@ def create_message(sender, to, subject, body, thread_id=None, in_reply_to=None, 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     return {"raw": raw, "threadId": thread_id}
 
+
+def _decode_base64url(data: str) -> str:
+    if not data:
+        return ""
+    padding = "=" * (-len(data) % 4)
+    decoded = base64.urlsafe_b64decode(data + padding)
+    return decoded.decode("utf-8", errors="replace")
+
+
+def _extract_message_bodies(payload: dict) -> tuple[str, str]:
+    text_parts: list[str] = []
+    html_parts: list[str] = []
+
+    def walk(part: dict) -> None:
+        mime_type = part.get("mimeType", "")
+        body = part.get("body", {})
+        data = body.get("data")
+
+        if mime_type == "text/plain" and data:
+            text_parts.append(_decode_base64url(data))
+        elif mime_type == "text/html" and data:
+            html_parts.append(_decode_base64url(data))
+
+        for child in part.get("parts", []) or []:
+            walk(child)
+
+    walk(payload or {})
+    return ("\n\n".join(p for p in text_parts if p).strip(), "\n\n".join(p for p in html_parts if p).strip())
+
+
 def run_tool(**kwargs) -> str:
     action = kwargs.get("action")
     try:
@@ -119,6 +153,7 @@ def run_tool(**kwargs) -> str:
 
         if action == "search":
             query = kwargs.get("query", "") if kwargs.get("query") else ""
+            include_body = bool(kwargs.get("include_body", False))
             results = service.users().messages().list(userId="me", q=query, maxResults=5).execute()
             messages = results.get("messages", [])
 
@@ -140,8 +175,60 @@ def run_tool(**kwargs) -> str:
                         sender = header["value"]
 
                 snippet = msg_data.get("snippet", "")
-                email_summaries.append(f"ID: {msg['id']}\nFrom: {sender}\nSubject: {subject}\nSnippet: {snippet}\n{'-'*20}")
+                entry_parts = [
+                    f"ID: {msg['id']}",
+                    f"From: {sender}",
+                    f"Subject: {subject}",
+                    f"Snippet: {snippet}",
+                ]
+
+                if include_body:
+                    text_body, html_body = _extract_message_bodies(payload)
+                    if not text_body and not html_body:
+                        text_body = snippet
+                    if text_body:
+                        entry_parts.extend(["", "Plain Text Body:", text_body])
+                    if html_body:
+                        entry_parts.extend(["", "HTML Body:", html_body])
+
+                entry_parts.append("-" * 20)
+                email_summaries.append("\n".join(entry_parts))
             return "\n".join(email_summaries)
+
+        elif action == "read":
+            message_id = kwargs.get("message_id")
+            if not message_id:
+                return "Error: Message ID is required to read an email."
+
+            msg_data = service.users().messages().get(userId="me", id=message_id, format="full").execute()
+            payload = msg_data.get("payload", {})
+            headers = payload.get("headers", [])
+
+            header_map = {header.get("name", ""): header.get("value", "") for header in headers}
+            subject = header_map.get("Subject", "No Subject")
+            sender = header_map.get("From", "Unknown Sender")
+            to = header_map.get("To", "Unknown Recipient")
+            date = header_map.get("Date", "Unknown Date")
+
+            text_body, html_body = _extract_message_bodies(payload)
+            if not text_body and not html_body:
+                text_body = msg_data.get("snippet", "")
+
+            parts = [
+                f"ID: {message_id}",
+                f"From: {sender}",
+                f"To: {to}",
+                f"Date: {date}",
+                f"Subject: {subject}",
+                "",
+            ]
+
+            if text_body:
+                parts.extend(["Plain Text Body:", text_body, ""])
+            if html_body:
+                parts.extend(["HTML Body:", html_body, ""])
+
+            return "\n".join(parts).strip()
 
         elif action == "send":
             recipient = kwargs.get("recipient")
