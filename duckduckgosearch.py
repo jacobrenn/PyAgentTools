@@ -89,22 +89,25 @@ def describe() -> None:
 
 @cli.command()
 @click.option(
-    "--args-file",
-    "args_file",
+    "--args",
+    "args_json",
     required=True,
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    help="Path to a JSON file containing the tool arguments.",
+    help="JSON object containing the tool arguments.",
 )
-def invoke(args_file: Path) -> None:
-    """Run the tool with arguments read from ``--args-file``."""
+def invoke(args_json: str | None = None) -> None:
+    """Run the tool with arguments supplied via ``--args``."""
+    if not args_json:
+        click.echo("Missing tool arguments. Provide --args as a JSON string.", err=True)
+        sys.exit(2)
+
     try:
-        arguments = json.loads(args_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        click.echo(f"Failed to read --args-file: {exc}", err=True)
+        arguments = json.loads(args_json)
+    except json.JSONDecodeError as exc:
+        click.echo(f"Failed to parse {args_json} as JSON: {exc}", err=True)
         sys.exit(2)
 
     if not isinstance(arguments, dict):
-        click.echo("--args-file must contain a JSON object.", err=True)
+        click.echo("--args must contain a JSON object.", err=True)
         sys.exit(2)
 
     try:
